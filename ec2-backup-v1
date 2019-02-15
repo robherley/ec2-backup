@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import subprocess
+import json
+import pprint
 
-def find_ec2(region):
-    command = "aws ec2 describe-images --owners 099720109477 --filters 'Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-xenial-16.04-amd64-server-????????' 'Name=state,Values=available' --query 'sort_by(Images, &CreationDate)[-1].{name: Name, id: ImageId}' --output json --region us-east-1"
 
-
-def main():
+def parse_args():
+    """Parses command line arguments"""
     parser = argparse.ArgumentParser(description="""Creates an instance
                                      suitable for the specified volume,
                                      attaches the volume to the instance,
@@ -14,7 +15,64 @@ def main():
                                      volume.""")
     parser.add_argument('-v', required=True, metavar="volume-id",
                         help="id of the volume to mount")
-    parser.parse_args()
+    return parser.parse_args()
+
+
+def error(string):
+    print(f'ec2-backup-v1: error: {string}')
+    exit(1)
+
+
+def find_ec2_ami(region):
+    """Finds the latest Ubuntu 16.04 LTS AMI in a specified region
+
+    Arguments:
+        region {str} -- region to search for EC2 AMI
+    """
+
+    cmd = ("aws ec2 describe-images --owners 099720109477 --filters "
+           "'Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-xenial-16.04"
+           "-amd64-server-????????' 'Name=state,Values=available' --query "
+           "'sort_by(Images, &CreationDate)[-1].{name: Name, id: ImageId}'"
+           " --output json --region " + region)
+    try:
+        proc = subprocess.run(cmd, shell=True, check=True, capture_output=True)
+        ami_info = json.loads(proc.stdout)
+        return ami_info
+    except subprocess.CalledProcessError:
+        error(f"unable to obtain AMI for specified region ({region})")
+    except json.JSONDecodeError:
+        error(f"unable to parse aws-cli output")
+    except Exception as e:
+        error(f"an unknown error has occurred:\n {e}")
+
+
+def find_volume(id):
+    cmd = f"aws ec2 describe-volumes --query 'Volumes[0]' --volume-id {id}"
+    try:
+        proc = subprocess.run(cmd, shell=True, check=True, capture_output=True)
+        vol_info = json.loads(proc.stdout)
+        if vol_info['State'] != 'available':
+            error(f'specified volume ({id}) is not available')
+        else:
+            return vol_info
+    except subprocess.CalledProcessError:
+        error(f"unable to find specified volume ({id})")
+    except json.JSONDecodeError:
+        error(f"unable to parse aws-cli output")
+    except Exception as e:
+        error(f"an unknown error has occurred:\n {e}")
+
+
+def main():
+    args = parse_args()
+    vol = find_volume(args.v)
+    ami = find_ec2_ami("us-east-1")
+    pp = pprint.PrettyPrinter(indent=4)
+    print("Volume:")
+    pp.pprint(vol)
+    print("\nAMI:")
+    pp.pprint(ami)
 
 
 if __name__ == "__main__":
