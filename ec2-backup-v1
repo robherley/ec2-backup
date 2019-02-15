@@ -18,16 +18,19 @@ def parse_args():
     return parser.parse_args()
 
 
-def error(string):
-    print(f'ec2-backup-v1: error: {string}')
+def error(msg: str):
+    print(f'ec2-backup-v1: error: {msg}')
     exit(1)
 
 
-def find_ec2_ami(region):
+def find_ec2_ami(region: str) -> dict:
     """Finds the latest Ubuntu 16.04 LTS AMI in a specified region
 
     Arguments:
         region {str} -- region to search for EC2 AMI
+
+    Returns:
+        dict -- information about compatible ami
     """
 
     cmd = ("aws ec2 describe-images --owners 099720109477 --filters "
@@ -47,7 +50,16 @@ def find_ec2_ami(region):
         error(f"an unknown error has occurred:\n {e}")
 
 
-def find_volume(id):
+def find_volume(id: str) -> dict:
+    """Finds an EBS volume based on a specified id
+
+    Arguments:
+        id {str} -- id of volume to find
+
+    Returns:
+        dict -- information about the specified volume
+    """
+    # TODO: see if we need to check all regions or just use default
     cmd = f"aws ec2 describe-volumes --query 'Volumes[0]' --volume-id {id}"
     try:
         proc = subprocess.run(cmd, shell=True, check=True, capture_output=True)
