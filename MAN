@@ -1,0 +1,93 @@
+EC2-BACKUP-V1(1)	NetBSD General Commands Manual	      EC2-BACKUP-V1(1)
+
+NAME
+     ec2-backup-v1 -- backup a directory into Elastic Block Storage (EBS)
+
+SYNOPSIS
+     ec2-backup-v1 [-h] -v volume-id
+
+DESCRIPTION
+     The ec2-backup(1) tool will eventually perform a backup of the given
+     directory into Amazon Elastic Block Storage (EBS).	 This will be achieved
+     by creating a volume of the appropriate size, attaching it to an EC2
+     instance and finally copying the files from the given directory onto this
+     volume.
+
+     The ec2-backup-v1 tool is the first iteration of this program and does
+     not actually perform a backup.  This program merely allows the user to
+     specify a volume that ec2-backup-v1 will attach to a suitable instance
+     and display the disklabel of.
+
+OPTIONS
+     ec2-backup-v1 accepts the following command-line flags:
+
+     -h		   Print a usage statement and exit.
+
+     -v volume-id  Use the given volume instead of creating a new one.
+
+DETAILS
+     ec2-backup-v1 will create an instance suitable for the specified volume,
+     attach the volume to the instance, remotely log in on the instance and
+     display the disklabel of the attached volume.
+
+ENVIRONMENT
+     ec2-backup-v1 can safely assume that the user has set up their environ-
+     ment for use with the AWS command-line tools.  That is, the user has run
+     'aws configure' and can create instances or volumes without any addi-
+     tional configuration or special flags.
+
+     ec2-backup-v1 can also safely assume that the user has set up their envi-
+     ronment to enable them to ssh to an EC2 instance without any special
+     flags on the command-line.	 That is, the user has a suitable section in
+     their ~/.ssh/config file to ensure that running 'ssh ec2-instance.amazon-
+     aws.com' succeeds.
+
+     To accomplish this, the user has created an SSH key pair named
+     'ec2-backup' and configured their SSH setup to use that key to connect to
+     EC2 instances.
+
+EXIT STATUS
+     The ec2-backup-v1 will exit with a return status of 0 under normal cir-
+     cumstances.  If an error occurred, ec2-backup-v1 will exit with a value
+     >0.
+
+EXAMPLES
+     The following example illustrates common usage of this tool.
+
+	   $ ec2-backup-v1 -v vol-0e1f671b77b177a78
+	   # /dev/rxbd2d:
+	   type: ESDI
+	   disk: Xen Virtual ESDI
+	   label: fictitious
+	   flags:
+	   bytes/sector: 512
+	   sectors/track: 2048
+	   tracks/cylinder: 1
+	   sectors/cylinder: 2048
+	   cylinders: 1024
+	   total sectors: 2097152
+	   rpm: 3600
+	   interleave: 1
+	   trackskew: 0
+	   cylinderskew: 0
+	   headswitch: 0	   # microseconds
+	   track-to-track seek: 0  # microseconds
+	   drivedata: 0
+
+	   4 partitions:
+	   #	    size    offset     fstype [fsize bsize cpg/sgs]
+	    a:	 2097152	 0     4.2BSD	   0	 0     0 (Cyl.	    0 -	  1023)
+	    d:	 2097152	 0     unused	   0	 0	 (Cyl.	    0 -	  1023)
+	   disklabel: boot block size 0
+	   disklabel: super block size 0
+
+SEE ALSO
+     aws help, ssh(1), disklabel(8)
+
+HISTORY
+     ec2-backup-v1 was originally assigned by Jan Schaumann
+     <jschauma@cs.stevens.edu> as a homework assignment for the class "Aspects
+     of System Administration" at Stevens Institute of Technology in the
+     Spring of 2019.
+
+NetBSD 7.0		       February 12, 2019		    NetBSD 7.0
