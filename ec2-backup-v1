@@ -97,12 +97,24 @@ def find_regional_volume(id: str) -> (str, dict):
         error(f"\n{e}")
 
 
+class EC2Instance:
+    def __init__(self, ami_id, region, vol):
+        self.ami_id = ami_id
+        self.region = region
+        self.vol = vol
+
+    def start(self):
+        print("Region:", self.region)
+        print("AMI ID:", self.ami_id)
+        print("Volume:", self.vol)
+
+
 def main():
     args = parse_args()
     region, vol = find_regional_volume(args.v)
     ami = find_ec2_ami(region)
-    print("Region:", region)
-    print("AMI ID:", ami['id'])
+    inst = EC2Instance(ami['id'], region, vol)
+    inst.start()
 
 
 if __name__ == "__main__":
