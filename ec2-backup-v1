@@ -60,20 +60,21 @@ def find_ec2_ami(region: str) -> dict:
                    " 'Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-xenial-"
                    "16.04-amd64-server-????????' 'Name=state,Values="
                    "available' --query 'sort_by(Images, &CreationDate)[-1]"
-                   ".{name: Name, id: ImageId}'",
-                   f" --output json --region " + region))
+                   ".{name: Name, id: ImageId}'"
+                   f" --output json --region {region}"))
     return ami
 
 
-def find_volume(id: str) -> dict:
+def find_regional_volume(id: str) -> (str, dict):
     """Finds an EBS volume based on a specified id
 
     Arguments:
         id {str} -- id of volume to find
 
     Returns:
-        dict -- information about the specified volume
+        (str, dict) -- region name and information about the specified volume
     """
+
     regions = run_aws(("aws ec2 describe-regions --query "
                        "'Regions[*].RegionName' --output json"))
     def vol(r): return (f"aws ec2 describe-volumes --region {r} --query"
@@ -87,7 +88,7 @@ def find_volume(id: str) -> dict:
         vol_info = json.loads(procs[vol_index].stdout.read())
         if vol_info['State'] != 'available':
             error(f'specified volume ({id}) is not available')
-        return vol_info
+        return (regions[vol_index], vol_info)
     except ValueError:
         error(f"specified volume ({id}) was not found in any region")
     except json.JSONDecodeError as e:
@@ -98,13 +99,10 @@ def find_volume(id: str) -> dict:
 
 def main():
     args = parse_args()
-    vol = find_volume(args.v)
-    ami = find_ec2_ami("us-east-1")
-    pp = pprint.PrettyPrinter(indent=4)
-    print("Volume:")
-    pp.pprint(vol)
-    print("\nAMI:")
-    pp.pprint(ami)
+    region, vol = find_regional_volume(args.v)
+    ami = find_ec2_ami(region)
+    print("Region:", region)
+    print("AMI ID:", ami['id'])
 
 
 if __name__ == "__main__":
