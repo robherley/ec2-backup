@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
+from subprocess import run, Popen, PIPE
 import argparse
-import subprocess
 import json
 import pprint
 
@@ -23,6 +23,29 @@ def error(msg: str):
     exit(1)
 
 
+def run_aws(cmd: str) -> dict:
+    """Given a string, run the aws command in a subprocess and parse the json
+    output into a dict
+
+    Arguments:
+        cmd {str} -- command to execute
+
+    Returns:
+        dict -- parsed JSON output
+    """
+
+    try:
+        proc = run(cmd, shell=True, check=True, capture_output=True)
+        j = json.loads(proc.stdout)
+        return j
+    except subprocess.CalledProcessError as e:
+        error(f"an error occurred in the aws subprocess:\n {e}")
+    except json.JSONDecodeError as e:
+        error(f"unable to parse aws-cli output:\n {e}")
+    except Exception as e:
+        error(f"an unknown error has occurred:\n {e}")
+
+
 def find_ec2_ami(region: str) -> dict:
     """Finds the latest Ubuntu 16.04 LTS AMI in a specified region
 
@@ -33,21 +56,13 @@ def find_ec2_ami(region: str) -> dict:
         dict -- information about compatible ami
     """
 
-    cmd = ("aws ec2 describe-images --owners 099720109477 --filters "
-           "'Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-xenial-16.04"
-           "-amd64-server-????????' 'Name=state,Values=available' --query "
-           "'sort_by(Images, &CreationDate)[-1].{name: Name, id: ImageId}'"
-           " --output json --region " + region)
-    try:
-        proc = subprocess.run(cmd, shell=True, check=True, capture_output=True)
-        ami_info = json.loads(proc.stdout)
-        return ami_info
-    except subprocess.CalledProcessError:
-        error(f"unable to obtain AMI for specified region ({region})")
-    except json.JSONDecodeError:
-        error(f"unable to parse aws-cli output")
-    except Exception as e:
-        error(f"an unknown error has occurred:\n {e}")
+    ami = run_aws(("aws ec2 describe-images --owners 099720109477 --filters"
+                   " 'Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-xenial-"
+                   "16.04-amd64-server-????????' 'Name=state,Values="
+                   "available' --query 'sort_by(Images, &CreationDate)[-1]"
+                   ".{name: Name, id: ImageId}'",
+                   f" --output json --region " + region))
+    return ami
 
 
 def find_volume(id: str) -> dict:
@@ -59,21 +74,26 @@ def find_volume(id: str) -> dict:
     Returns:
         dict -- information about the specified volume
     """
-    # TODO: see if we need to check all regions or just use default
-    cmd = f"aws ec2 describe-volumes --query 'Volumes[0]' --volume-id {id}"
+    regions = run_aws(("aws ec2 describe-regions --query "
+                       "'Regions[*].RegionName' --output json"))
+    def vol(r): return (f"aws ec2 describe-volumes --region {r} --query"
+                        f" 'Volumes[0]' --output json --volume-id {id}")
+    procs = [Popen(vol(i), shell=True, stdout=PIPE, stderr=PIPE)
+             for i in regions]
+    for p in procs:
+        p.wait()
     try:
-        proc = subprocess.run(cmd, shell=True, check=True, capture_output=True)
-        vol_info = json.loads(proc.stdout)
+        vol_index = list(map(lambda x: x.returncode, procs)).index(0)
+        vol_info = json.loads(procs[vol_index].stdout.read())
         if vol_info['State'] != 'available':
             error(f'specified volume ({id}) is not available')
-        else:
-            return vol_info
-    except subprocess.CalledProcessError:
-        error(f"unable to find specified volume ({id})")
-    except json.JSONDecodeError:
-        error(f"unable to parse aws-cli output")
+        return vol_info
+    except ValueError:
+        error(f"specified volume ({id}) was not found in any region")
+    except json.JSONDecodeError as e:
+        error(f"unable to parse aws-cli output:\n {e}")
     except Exception as e:
-        error(f"an unknown error has occurred:\n {e}")
+        error(f"\n{e}")
 
 
 def main():
