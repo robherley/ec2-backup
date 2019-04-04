@@ -11,8 +11,9 @@ import os
 import atexit
 
 # Global Vars
-is_verbose = False  # used for verbose printing
-backup = None       # used to store our backup class (needed for exit handler)
+is_verbose = os.environ.get('EC2_BACKUP_VERBOSE') is not None
+backup = None  # used to store our backup class (needed for exit handler)
+orphan_ebs = False  # if we create our own ebs (used for cleanup)
 
 # Type Alias
 Volume = 'boto3.resources.factory.ec2.Volume'
@@ -31,16 +32,6 @@ amis = {
 }
 
 
-@atexit.register
-def graceful_exit():
-    print('exiting gracefully...')
-    global backup
-    if backup:
-        if backup.instance:
-            print('terminating instance...')
-            backup.instance.terminate()
-
-
 def error(msg: str):
     print(f'ec2-backup: error: {msg}', file=sys.stderr)
     exit(1)
@@ -50,6 +41,18 @@ def verbose(msg):
     global is_verbose
     if is_verbose:
         print(f"{inspect.stack()[1][3]}\t: {msg}")
+
+
+@atexit.register
+def graceful_exit():
+    global backup
+    if backup:
+        if backup.instance:
+            verbose("Error occurred, cleaning up instance...")
+            backup.instance.terminate()
+        if orphan_ebs:
+            verbose("Error occurred, cleaning up created EBS Volume...")
+            backup.volume.delete()
 
 
 def parse_args():
@@ -116,7 +119,14 @@ def find_region_volume(id: str) -> (str, Volume):
 
 
 class EC2Backup:
+    region = None
+    volume = None
+    instance = None
+
     def __init__(self, dir, volume):
+        global backup
+        backup = self
+
         self.flags_aws = os.environ.get('EC2_BACKUP_FLAGS_AWS')
         self.flags_ssh = os.environ.get('EC2_BACKUP_FLAGS_SSH')
         if self.flags_aws:
@@ -126,13 +136,22 @@ class EC2Backup:
 
         self.check_dir(dir)
         if volume:  # volume was specified
-            verbose(f'Checking volume: {volume}')
             self.check_volume(volume)
 
         self.create_instance()
 
         if not volume:  # volume was not specified
-            verbose(f'Creating EBS Volume of Size {self.src_size * 2}')
+            self.create_volume()
+
+        self.attach_volume()
+
+        self.start_backup()
+
+        # if we got here successfully, don't cleanup the ebs
+        global orphan_ebs
+        orphan_ebs = False
+
+        self.print_volume_id()
 
     def check_dir(self, dir):
         # note: os.access will follow symlinks by default
@@ -153,6 +172,8 @@ class EC2Backup:
             gb = float(proc.stdout.split()[0].decode('utf-8'))
             # convert to Gibibyte for EBS Volume
             self.src_size = ceil(gb * 0.9313226)
+            if (self.src_size * 2) > 1024:
+                error(f"src is too large to copy, must be less than 1024 GiB")
             verbose(f'Source Block Size: {self.src_size} GiB')
         except CalledProcessError as e:
             error((f"unable to get filesize of directory {dir}, ensure you have"
@@ -161,6 +182,7 @@ class EC2Backup:
             error(f"an unknown error has occurred while reading src dir:\n{e}")
 
     def check_volume(self, vol_id):
+        verbose(f'Checking volume: {volume}')
         region, vol = find_region_volume(vol_id)
         verbose(f"EBS Volume Region: {region}")
         self.region = region
@@ -171,9 +193,24 @@ class EC2Backup:
         verbose(f"Specified volume has sufficient capacity ({vol.size} GiB)")
 
     def create_volume(self):
-        pass
+        s = boto3.session.Session(region_name=self.region)
+        ec2 = s.resource('ec2')
+        verbose(f'Creating EBS Volume of Size {self.src_size * 2} GiB')
+        self.volume = ec2.create_volume(
+            AvailabilityZone=self.instance.placement['AvailabilityZone'],
+            Size=self.src_size * 2, VolumeType='standard')
+        global orphan_ebs
+        orphan_ebs = True
+        verbose((f"Created Volume: {self.volume.volume_id}"
+                 f"Size: ({self.src_size * 2} GiB)"))
+        verbose(f"Waiting until volume is available...")
+        client = s.client('ec2')
+        client.get_waiter('volume_available').wait(
+            VolumeIds=[self.volume.volume_id])
+        verbose(f"Volume Available!")
 
     def create_instance(self):
+        # TODO https://stackoverflow.com/questions/51611411/get-latest-ami-id-for-aws-instance
         if not self.region:
             # volume wasn't specified, so no region specified
             session = boto3.session.Session()
@@ -202,23 +239,41 @@ class EC2Backup:
         self.instance.wait_until_running()
         verbose(f"Instance Running! {self.instance.state}")
 
+    def attach_volume(self):
+        s = boto3.session.Session(region_name=self.region)
+        try:
+            self.instance.attach_volume(
+                Device='/dev/sdx', VolumeId=self.volume.volume_id)
+            client = s.client('ec2')
+            verbose(f"Waiting until volume is attached to instance")
+            client.get_waiter('volume_in_use').wait(
+                VolumeIds=[self.volume.volume_id])
+            verbose(f"Volume Attached!")
+        except Exception as e:
+            error("unable to attach EBS volume to instance")
+
+    def start_backup(self):
+        try:
+            cmd = ((f"ssh {self.flags_ssh or ''} root@"
+                    f"{self.instance.public_dns_name} /bin/tar -cf "
+                    f"- {self.src_dir} | /bin/dd of='/dev/xbd'"))
+            verbose(f"Copying {self.src_dir} to EBS")
+            proc = run(cmd, shell=True, check=True, capture_output=True)
+            print(proc.stdout.decode('utf8'))
+            return
+        except CalledProcessError as e:
+            error(f'an unknown occurred in the ssh subprocess:\n{e}')
+        except Exception as e:
+            error('an unknown error occurred while attempting to ssh')
+
     def print_volume_id(self):
         print(self.volume.volume_id)
 
 
 def main():
     args = parse_args()
-    # check env vars, and set env accordingly
-    if os.environ.get('EC2_BACKUP_VERBOSE'):
-        global is_verbose
-        is_verbose = True
 
-    global backup
-    backup = EC2Backup(args.dir[0], 'vol-0a2722cd4a12e8a66')
-
-    # create instance in region
-
-    # default key: ec2-backup
+    EC2Backup(args.dir[0], args.v)
 
     # Testing Volumes
     # vol-08e068684d257a0b3 - us-east-1a
