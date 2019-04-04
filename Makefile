@@ -1,2 +1,2 @@
 all:
-	chmod +x ./ec2-backup-v1
+	chmod +x ./ec2-backup

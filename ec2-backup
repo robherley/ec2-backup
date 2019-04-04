@@ -1,0 +1,229 @@
+#!/usr/bin/env python3.7
+from subprocess import run, Popen, PIPE, CalledProcessError
+from time import sleep
+from math import ceil
+import inspect
+import boto3
+import argparse
+import json
+import sys
+import os
+import atexit
+
+# Global Vars
+is_verbose = False  # used for verbose printing
+backup = None       # used to store our backup class (needed for exit handler)
+
+# Type Alias
+Volume = 'boto3.resources.factory.ec2.Volume'
+
+# From: https://wiki.netbsd.org/amazon_ec2/amis/
+amis = {
+    'us-east-1': 'ami-bc8fc8d6',
+    'us-west-1': 'ami-7b0b621b',
+    'us-west-2': 'ami-9c9f8ffd',
+    'eu-central-1': 'ami-32e6f45e',
+    'eu-west-1': 'ami-ac983ddf',
+    'ap-southeast-1': 'ami-c8ea2bab',
+    'ap-southeast-2': 'ami-8a89d0e9',
+    'ap-northeast-1': 'ami-d7eeccb9',
+    'sa-east-1': 'ami-51d0553d'
+}
+
+
+@atexit.register
+def graceful_exit():
+    print('exiting gracefully...')
+    global backup
+    if backup:
+        if backup.instance:
+            print('terminating instance...')
+            backup.instance.terminate()
+
+
+def error(msg: str):
+    print(f'ec2-backup: error: {msg}', file=sys.stderr)
+    exit(1)
+
+
+def verbose(msg):
+    global is_verbose
+    if is_verbose:
+        print(f"{inspect.stack()[1][3]}\t: {msg}")
+
+
+def parse_args():
+    """Parses command line arguments"""
+    parser = argparse.ArgumentParser(
+        description="""The ec2-backup tool performs a backup of the given 
+        directory into Amazon Elastic Block Storage (EBS).  This is achieved by 
+        creating a volume of the appropriate size, attaching it to an EC2 
+        instance and finally copying the files from the given directory onto 
+        this volume.""")
+    parser.add_argument('-v', required=False, metavar="volume-id",
+                        help="Use this volume instead of creating a new one.")
+    parser.add_argument('dir', nargs=1,
+                        help="Directory to backup.")
+    return parser.parse_args()
+
+
+def run_aws(cmd: str) -> dict:
+    """Given a string, run the aws command in a subprocess and parse the json
+    output into a dict
+
+    Arguments:
+        cmd {str} -- command to execute
+
+    Returns:
+        dict -- parsed JSON output
+    """
+
+    try:
+        proc = run(cmd + " --output json", shell=True,
+                   check=True, capture_output=True)
+        j = json.loads(proc.stdout)
+        return j
+    except CalledProcessError as e:
+        error(f"an error occurred in the aws subprocess:\n{e}")
+    except json.JSONDecodeError as e:
+        error(f"unable to parse aws-cli output:\n{e}")
+    except Exception as e:
+        error(f"an unknown error has occurred:\n{e}")
+
+
+def find_region_volume(id: str) -> (str, Volume):
+    """Finds an EBS volume and region based on a specified id
+
+    Arguments:
+        id {str} -- id of volume to find
+
+    Returns:
+        (str, volume) -- region name and boto3 volume resource
+    """
+
+    for region in amis:
+        s = boto3.session.Session(region_name=region)
+        ec2 = s.resource('ec2')
+        try:
+            volume = ec2.Volume(id)
+            if volume.state != 'available':
+                error((f"volume ({id}) is not available:"
+                       f" state: {volume.state}"))
+            return region, volume
+        except:
+            continue
+    error(f"volume ({id}) was not found in any supported regions")
+
+
+class EC2Backup:
+    def __init__(self, dir, volume):
+        self.flags_aws = os.environ.get('EC2_BACKUP_FLAGS_AWS')
+        self.flags_ssh = os.environ.get('EC2_BACKUP_FLAGS_SSH')
+        if self.flags_aws:
+            verbose(f'Setting AWS Flags: "{flags_aws}"')
+        if self.flags_ssh:
+            verbose(f'Setting SSH Flags: "{flags_ssh}"')
+
+        self.check_dir(dir)
+        if volume:  # volume was specified
+            verbose(f'Checking volume: {volume}')
+            self.check_volume(volume)
+
+        self.create_instance()
+
+        if not volume:  # volume was not specified
+            verbose(f'Creating EBS Volume of Size {self.src_size * 2}')
+
+    def check_dir(self, dir):
+        # note: os.access will follow symlinks by default
+        if not os.access(dir, os.F_OK):
+            error(f"directory ({dir}) does not exist")
+
+        if not os.access(dir, os.R_OK):
+            error(f"user does not have read access for directory ({dir})")
+
+        self.src_dir = dir
+        verbose(f'Valid Source Directory: {self.src_dir}')
+
+        # get size of directory with du(1)
+        try:
+            # Get size in GB blocks (-g)
+            proc = run(f"du -sg {dir}", shell=True,
+                       check=True, capture_output=True)
+            gb = float(proc.stdout.split()[0].decode('utf-8'))
+            # convert to Gibibyte for EBS Volume
+            self.src_size = ceil(gb * 0.9313226)
+            verbose(f'Source Block Size: {self.src_size} GiB')
+        except CalledProcessError as e:
+            error((f"unable to get filesize of directory {dir}, ensure you have"
+                   f" access to all the files in the specified directory\n{e}"))
+        except Exception as e:
+            error(f"an unknown error has occurred while reading src dir:\n{e}")
+
+    def check_volume(self, vol_id):
+        region, vol = find_region_volume(vol_id)
+        verbose(f"EBS Volume Region: {region}")
+        self.region = region
+        if vol.size < self.src_size:
+            error((f"not enough space on destination volume ({vol_id})\n"
+                   f"capacity: {vol.size} GiB, required: {self.src_size} GiB"))
+        self.volume = vol
+        verbose(f"Specified volume has sufficient capacity ({vol.size} GiB)")
+
+    def create_volume(self):
+        pass
+
+    def create_instance(self):
+        if not self.region:
+            # volume wasn't specified, so no region specified
+            session = boto3.session.Session()
+            self.region = session.region_name
+        if self.region not in amis:
+            error(
+                f'region specified ({self.region}) is not supported by netbsd')
+        cmd = ("aws ec2 run-instances --count 1 --instance-type t1.micro "
+               "--key-name ec2-backup --security-groups default "
+               f"--query 'Instances[0]' --image-id {amis[self.region]}")
+        # if already have a volume (if not just use config region)
+        if self.volume:
+            cmd += (f" --region {self.region} --placement "
+                    f"'AvailabilityZone={self.volume.availability_zone}'"
+                    f" --image-id {amis[self.region]}")
+
+        # add custom flags at the end of everything
+        cmd += f" {self.flags_aws or ''}"
+
+        inst_info = run_aws(cmd)
+        verbose(f"Created instance: {inst_info['InstanceId']}")
+        s = boto3.session.Session(region_name=self.region)
+        ec2 = s.resource('ec2')
+        self.instance = ec2.Instance(inst_info['InstanceId'])
+        verbose(f"Waiting until instance is running...")
+        self.instance.wait_until_running()
+        verbose(f"Instance Running! {self.instance.state}")
+
+    def print_volume_id(self):
+        print(self.volume.volume_id)
+
+
+def main():
+    args = parse_args()
+    # check env vars, and set env accordingly
+    if os.environ.get('EC2_BACKUP_VERBOSE'):
+        global is_verbose
+        is_verbose = True
+
+    global backup
+    backup = EC2Backup(args.dir[0], 'vol-0a2722cd4a12e8a66')
+
+    # create instance in region
+
+    # default key: ec2-backup
+
+    # Testing Volumes
+    # vol-08e068684d257a0b3 - us-east-1a
+    # vol-0a2722cd4a12e8a66 - eu-west-1a
+
+
+if __name__ == "__main__":
+    main()
