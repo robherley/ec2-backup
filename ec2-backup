@@ -34,7 +34,7 @@ amis = {
 
 def error(msg: str):
     print(f'ec2-backup: error: {msg}', file=sys.stderr)
-    exit(1)
+    sys.exit(1)
 
 
 def verbose(msg):
@@ -47,12 +47,13 @@ def verbose(msg):
 def graceful_exit():
     global backup
     if backup:
-        if backup.instance:
-            verbose("Error occurred, cleaning up instance...")
-            backup.instance.terminate()
         if orphan_ebs:
-            verbose("Error occurred, cleaning up created EBS Volume...")
+            verbose("Exit occurred, cleaning up created EBS Volume...")
+            backup.volume.detach_from_instance()
             backup.volume.delete()
+        if backup.instance:
+            verbose("Exit occurred, cleaning up instance...")
+            backup.instance.terminate()
 
 
 def parse_args():
@@ -112,6 +113,7 @@ def find_region_volume(id: str) -> (str, Volume):
             if volume.state != 'available':
                 error((f"volume ({id}) is not available:"
                        f" state: {volume.state}"))
+                return
             return region, volume
         except:
             continue
@@ -123,7 +125,7 @@ class EC2Backup:
     volume = None
     instance = None
 
-    def __init__(self, dir, volume):
+    def __init__(self, dir: str, volume: str):
         global backup
         backup = self
 
@@ -153,7 +155,14 @@ class EC2Backup:
 
         self.print_volume_id()
 
-    def check_dir(self, dir):
+    def check_dir(self, dir: str):
+        """Checks a directory for existance, and read access. Also computes the
+        size of the directory in GiB blocks.
+
+        Arguments:
+            dir {str} -- path to directory to check
+        """
+
         # note: os.access will follow symlinks by default
         if not os.access(dir, os.F_OK):
             error(f"directory ({dir}) does not exist")
@@ -181,8 +190,16 @@ class EC2Backup:
         except Exception as e:
             error(f"an unknown error has occurred while reading src dir:\n{e}")
 
-    def check_volume(self, vol_id):
-        verbose(f'Checking volume: {volume}')
+    def check_volume(self, vol_id: str):
+        """Based on a volume id, finds the volume (if it exists) and the region
+        containing the volume. Also checks to make sure the volume is large
+        enough to hold the source data.
+
+        Arguments:
+            vol_id {str} -- volume to find
+        """
+
+        verbose(f'Checking volume: {vol_id}')
         region, vol = find_region_volume(vol_id)
         verbose(f"EBS Volume Region: {region}")
         self.region = region
@@ -193,6 +210,10 @@ class EC2Backup:
         verbose(f"Specified volume has sufficient capacity ({vol.size} GiB)")
 
     def create_volume(self):
+        """Creates an EBS volume in the availability of the currently started
+        EC2 Instance
+        """
+
         s = boto3.session.Session(region_name=self.region)
         ec2 = s.resource('ec2')
         verbose(f'Creating EBS Volume of Size {self.src_size * 2} GiB')
@@ -210,7 +231,14 @@ class EC2Backup:
         verbose(f"Volume Available!")
 
     def create_instance(self):
-        # TODO https://stackoverflow.com/questions/51611411/get-latest-ami-id-for-aws-instance
+        """Creates an EC2 instance in AZ depending on
+            a) If the volume is specifed, creates in that region
+            b) If the volume is not specifed, uses default conf region
+
+            Waits until instance is in ready state
+            Note: uses cli to create volume to support flags in env
+        """
+
         if not self.region:
             # volume wasn't specified, so no region specified
             session = boto3.session.Session()
@@ -240,6 +268,10 @@ class EC2Backup:
         verbose(f"Instance Running! {self.instance.state}")
 
     def attach_volume(self):
+        """Attaches the current volume to the current instance, waits until
+        volume is in "in_use" state.
+        """
+
         s = boto3.session.Session(region_name=self.region)
         try:
             self.instance.attach_volume(
@@ -253,13 +285,19 @@ class EC2Backup:
             error("unable to attach EBS volume to instance")
 
     def start_backup(self):
+        """ Gets the directory data using tar(1) and pipes over ssh(1) to the 
+        EC2 instance, which will use dd(1) to write to the backup EBS volume
+        """
+
         try:
-            cmd = ((f"ssh {self.flags_ssh or ''} root@"
-                    f"{self.instance.public_dns_name} /bin/tar -cf "
-                    f"- {self.src_dir} | /bin/dd of='/dev/xbd'"))
+            # TODO change
+            print('change tar for netbsd')
+            cmd = ((f"tar -cf - {self.src_dir} | ssh -q {self.flags_ssh or ''} "
+                    f"root@{self.instance.public_dns_name} "
+                    f"/bin/dd of='/dev/xbd2'"))
             verbose(f"Copying {self.src_dir} to EBS")
             proc = run(cmd, shell=True, check=True, capture_output=True)
-            print(proc.stdout.decode('utf8'))
+            verbose(proc.stdout.decode('utf8'))
             return
         except CalledProcessError as e:
             error(f'an unknown occurred in the ssh subprocess:\n{e}')
