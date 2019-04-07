@@ -49,8 +49,7 @@ def graceful_exit():
     if backup:
         if orphan_ebs:
             verbose("Exit occurred, cleaning up created EBS Volume...")
-            backup.volume.detach_from_instance()
-            backup.volume.delete()
+            backup.detach_volume()
         if backup.instance:
             verbose("Exit occurred, cleaning up instance...")
             backup.instance.terminate()
@@ -284,14 +283,25 @@ class EC2Backup:
         except Exception as e:
             error("unable to attach EBS volume to instance")
 
+    def detach_volume(self):
+        """Detaches the current volume from the current instance, waits until
+        volume is available
+        """
+        self.volume.detach_from_instance(
+            InstanceId=backup.instance.instance_id, Force=True)
+        s = boto3.session.Session(region_name=self.region)
+        client = s.client('ec2')
+        client.get_waiter('volume_available').wait(
+            VolumeIds=[self.volume.volume_id])
+        self.volume.delete()
+
     def start_backup(self):
         """ Gets the directory data using tar(1) and pipes over ssh(1) to the 
         EC2 instance, which will use dd(1) to write to the backup EBS volume
         """
 
         try:
-            # TODO change
-            print('change tar for netbsd')
+            # TODO change tar for netbsd and check SSH
             cmd = ((f"tar -cf - {self.src_dir} | ssh -q {self.flags_ssh or ''} "
                     f"root@{self.instance.public_dns_name} "
                     f"/bin/dd of='/dev/xbd2'"))
