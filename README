@@ -1,58 +1,86 @@
 Robert Herley <rherley>
-HW2 - ec2-backup-v1
+HW6 - ec2-backup
 
 The Solution
 ============
 
-Simply put, my program is a collection of various aws-cli commands invoked in
-python subprocesses, and wrapped in various data structures. Every aws-cli 
-command is outputted in JSON format, which is then parsed into a Python 
-dictionary and used by various methods. 
-Here's the basic methodology of the program:
-  1.  Get volume id from the arguments.
-  2.  Check to see if the volume is within a region that supports a prebuilt
-      NetBSD AMI and see if the volume is available to be mounted. If these 
-      conditions hold, grab the Availability Zone.
-  3.  Create a NetBSD instance in the same region/AZ as the volume.
-  4.  Wait for the instance to be in the "running" state as reported by AWS.
-  5.  Grab the Public DNS of the instance.
-  6.  Attach the specified volume to "/dev/sdx" of the instance.
-  7.  SSH into the instance (via subprocess), and execute the following:
-        "/sbin/disklabel /dev/xbd2 2>&1; exit 0"
-      See Problems Encountered for an explanation.
-  8.  Grab stdout from subprocess, and print the output of disklabel.
-  9.  Terminate the instance.
+For the second iteration of the assignment, I strayed away from just executing
+shell commands in Python, and instead used the official AWS SDK, boto3. Using
+the SDK, I created a class (EC2Backup) that created the following control flow
+when instantiated:
+
+> Parse Command Args
+> Check Env Variables
+> Check Source Exists, and Read Access, Compute Size in GiB
+> Is the Volume is Provided?
+  -> Check AZ and Size can hold Directory
+  -> If not, continue
+> Create Instance
+  -> If Volume was Provided, use that AZ
+  -> If not, use User Config Region (or Env Flags)
+> Was a Volume not Provided?
+  -> Create Volume in same AZ as Instance (bc of Env Flags)
+  -> If not, continue
+> Attach The Volume (and wait for "in-use" state)
+> Pipe tar(1) into dd(1) over SSH for Backup
+> Print Volume ID
+> Exit Handler Deletes Instance
 
 
-Why Python?
-===========
+Learning From Mistakes
+======================
 
-Python (3) seemed like the best candidate for a multitude of reasons, but mostly
-because I'm experienced in it, and Amazon's boto3 SDK for AWS. Unfortunately,
-pip3 was not available on the Linux Lab, so I was unable to use it. Luckily,
-Python has really convenient subprocess libraries built-in for spawning new 
-processes, connecting to their input/output/error pipes, and obtain their return
-codes. Using these libraries, it was trivial to create functions to pass around
-the output from the aws-cli. While this could've done with a bash script, I
-personally felt that the code would be much more readable and extendable by
-utilizing Python's various data structures.
+Before completely refactoring my codebase for the new functionality, I addressed
+the two concerns with ec2-backup-v1. First, I created an exit handler to cleanup
+the instance when the program terminates. This was eventually extended for EBS
+volumes that were created during the process, and orphaned when the program did
+not terminate successfully. In addition, my original program faced race
+conditions while waiting for the instance to be in the "ready" state. This was
+fixed with `aws ec2 wait` which was then replaced by the boto3 Waiter class,
+which was the same functionality. But there was issues with this as well, which
+can be read in Problem Encountered below.
 
+
+Python and Boto3
+================
+
+Again, I chose Python (3.7) for this version of the assignment. I'm very
+familiar with the language and Amazon's official AWS SDK (boto3) was extremely
+useful for development. Instead of just executing shell commands within Python,
+the boto3 SDK allowed for simpler and more readable code, which is a lot more 
+reliable than trying to parse JSON output from the shell.
 
 Problems Encountered
 ====================
 
-While not exactly a problem, it took a noticeably long time for the NetBSD SSH
-sessions to be established after being created, even when AWS is reporting the
-instance in a "running" state. Compared to the Ubuntu AMIs, the time between
-creation to SSH session established felt like eternity with NetBSD. 
+The first problem I encountered was when I tried to run my script on the NetBSD
+ami, which has an outdated version of OpenSSL and was throwing warnings during
+my script's execution. Luckily, using pip (python's package manager), I was able
+to install the cryptography package version 2.2.2 (suggested by StackOverflow).
+This resolved the warnings and allowed my script to run without any hiccups due
+to OpenSSL version.
 
-A huge headache I encountered was that SSH was returning a 102 exit code in my
-python subprocess, which was then raising an exception. But, it would raise this
-exception even though the SSH exec for "disklabel /dev/xbd2" was working 
-properly. After a lot of coffee, I figured out the error. The following text was
-being sent to stderr:
-  disklabel: boot block size 0
-  disklabel: super block size 0
-In addition, disklabel(8) was exiting with a 102 code. Eventually, I settled 
-with "/sbin/disklabel /dev/xbd2 2>&1; exit 0". Although it's not elegant, it 
-works.
+The second (perhaps biggest) problem I had was with AWS' built-in methods for
+waiting on the instance "ready" state. It turns out the boto3 waiters and 
+`aws ec2 wait ...` only wait for the "ready" state which is some point when the
+kernel has booted. But, just because the instance is reporting "ready" doesn't
+mean the startup has finished, so the SSH process may not have started yet.
+So when the script tries to connect to port 22, it may fail with exit code 255.
+I've issues related to this problem across the internet (see links below) and
+the best solutions I've seen for this problem are loops with sleep(1) and
+another status check, or just sleep(1) for a period of around 40 seconds.
+Ideally, these are not good solutions, I would prefer to just switch to an AMI
+with a faster boot time, or create a custom image with some sort of health
+check so that I can ensure the SSH process is started and port 22 is open. But,
+that is a bit out of scope for this assignment in my opinion.
+
+https://forums.aws.amazon.com/thread.jspa?threadID=114343
+https://stackoverflow.com/questions/6025546/issues-trying-to-ssh-into-a-fresh-ec2-instance-with-paramiko
+https://stackoverflow.com/questions/19054081/ec2-waiting-until-a-new-instance-is-in-running-state/19055049
+https://stackoverflow.com/questions/30977532/aws-command-line-interface-aws-ec2-wait-max-attempts-exceeded
+
+
+References
+==========
+
+https://boto3.amazonaws.com/v1/documentation/api/latest/index.html
