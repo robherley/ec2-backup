@@ -13,23 +13,74 @@ when instantiated:
 > Check Env Variables
 > Check Source Exists, and Read Access, Compute Size in GiB
 > Is the Volume is Provided?
-  Yes > Check AZ and Size
-  No  > Create a New Volume twice size of 
+  -> Check AZ and Size can hold Directory
+  -> If not, continue
+> Create Instance
+  -> If Volume was Provided, use that AZ
+  -> If not, use User Config Region (or Env Flags)
+> Was a Volume not Provided?
+  -> Create Volume in same AZ as Instance (bc of Env Flags)
+  -> If not, continue
+> Attach The Volume (and wait for "in-use" state)
+> Pipe tar(1) into dd(1) over SSH for Backup
+> Print Volume ID
+> Exit Handler Deletes Instance
 
 
 Learning From Mistakes
 ======================
 
-- exit handler
-- boto3 waiters and aws ec2 wait
+Before completely refactoring my codebase for the new functionality, I addressed
+the two concerns with ec2-backup-v1. First, I created an exit handler to cleanup
+the instance when the program terminates. This was eventually extended for EBS
+volumes that were created during the process, and orphaned when the program did
+not terminate successfully. In addition, my original program faced race
+conditions while waiting for the instance to be in the "ready" state. This was
+fixed with `aws ec2 wait` which was then replaced by the boto3 Waiter class,
+which was the same functionality. But there was issues with this as well, which
+can be read in Problem Encountered below.
 
 
 Python and Boto3
 ================
 
-For the second rendition of the assignment, I again chose Python (3.7). 
+Again, I chose Python (3.7) for this version of the assignment. I'm very
+familiar with the language and Amazon's official AWS SDK (boto3) was extremely
+useful for development. Instead of just executing shell commands within Python,
+the boto3 SDK allowed for simpler and more readable code, which is a lot more 
+reliable than trying to parse JSON output from the shell.
 
 Problems Encountered
 ====================
 
-- size conversions
+The first problem I encountered was when I tried to run my script on the NetBSD
+ami, which has an outdated version of OpenSSL and was throwing warnings during
+my script's execution. Luckily, using pip (python's package manager), I was able
+to install the cryptography package version 2.2.2 (suggested by StackOverflow).
+This resolved the warnings and allowed my script to run without any hiccups due
+to OpenSSL version.
+
+The second (perhaps biggest) problem I had was with AWS' built-in methods for
+waiting on the instance "ready" state. It turns out the boto3 waiters and 
+`aws ec2 wait ...` only wait for the "ready" state which is some point when the
+kernel has booted. But, just because the instance is reporting "ready" doesn't
+mean the startup has finished, so the SSH process may not have started yet.
+So when the script tries to connect to port 22, it may fail with exit code 255.
+I've issues related to this problem across the internet (see links below) and
+the best solutions I've seen for this problem are loops with sleep(1) and
+another status check, or just sleep(1) for a period of around 40 seconds.
+Ideally, these are not good solutions, I would prefer to just switch to an AMI
+with a faster boot time, or create a custom image with some sort of health
+check so that I can ensure the SSH process is started and port 22 is open. But,
+that is a bit out of scope for this assignment in my opinion.
+
+https://forums.aws.amazon.com/thread.jspa?threadID=114343
+https://stackoverflow.com/questions/6025546/issues-trying-to-ssh-into-a-fresh-ec2-instance-with-paramiko
+https://stackoverflow.com/questions/19054081/ec2-waiting-until-a-new-instance-is-in-running-state/19055049
+https://stackoverflow.com/questions/30977532/aws-command-line-interface-aws-ec2-wait-max-attempts-exceeded
+
+
+References
+==========
+
+https://boto3.amazonaws.com/v1/documentation/api/latest/index.html

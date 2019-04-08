@@ -1,6 +1,8 @@
 #!/usr/bin/env python3.7
 from subprocess import run, Popen, PIPE, CalledProcessError
+from binary import BinaryUnits, DecimalUnits, convert_units
 from math import ceil
+from time import sleep
 import inspect
 import boto3
 import argparse
@@ -145,6 +147,12 @@ class EC2Backup:
 
         self.attach_volume()
 
+        # Wait another 50 seconds for instance to be ready for SSH. This is
+        # known to happen on slow-booting AMIs even though our instance is
+        # reporting back a "ready" state to AWS.
+        verbose("Waiting additional 50 seconds for EC2 to boot...")
+        sleep(50)
+
         self.start_backup()
 
         # if we got here successfully, don't cleanup the ebs
@@ -173,15 +181,16 @@ class EC2Backup:
 
         # get size of directory with du(1)
         try:
-            # Get size in GB blocks (-g)
-            proc = run(f"du -sg {dir}", shell=True,
+            # Get entire size in MB blocks (-m)
+            proc = run(f"du -sm {dir}", shell=True,
                        check=True, capture_output=True)
-            gb = float(proc.stdout.split()[0].decode('utf-8'))
-            # convert to Gibibyte for EBS Volume
-            self.src_size = ceil(gb * 0.9313226)
-            if (self.src_size * 2) > 1024:
+            mb = int(proc.stdout.split()[0].decode('utf-8'))
+            # convert Megabyte to Gibibyte for EBS Volume
+            self.src_size = ceil(convert_units(
+                mb * 2, DecimalUnits.MB, BinaryUnits.GB)[0])
+            if (self.src_size) > 1024:
                 error(f"src is too large to copy, must be less than 1024 GiB")
-            verbose(f'Source Block Size: {self.src_size} GiB')
+            verbose(f'Source (Block) Size: {self.src_size} GiB')
         except CalledProcessError as e:
             error((f"unable to get filesize of directory {dir}, ensure you have"
                    f" access to all the files in the specified directory\n{e}"))
@@ -214,14 +223,14 @@ class EC2Backup:
 
         s = boto3.session.Session(region_name=self.region)
         ec2 = s.resource('ec2')
-        verbose(f'Creating EBS Volume of Size {self.src_size * 2} GiB')
+        verbose(f'Creating EBS Volume of Size {self.src_size} GiB')
         self.volume = ec2.create_volume(
             AvailabilityZone=self.instance.placement['AvailabilityZone'],
-            Size=self.src_size * 2, VolumeType='standard')
+            Size=self.src_size, VolumeType='standard')
         global orphan_ebs
         orphan_ebs = True
         verbose((f"Created Volume: {self.volume.volume_id} "
-                 f"Size: ({self.src_size * 2} GiB)"))
+                 f"Size: ({self.src_size} GiB)"))
         verbose(f"Waiting until volume is available...")
         client = s.client('ec2')
         client.get_waiter('volume_available').wait(
@@ -254,7 +263,8 @@ class EC2Backup:
                     f" --image-id {amis[self.region]}")
 
         # add custom flags at the end of everything
-        cmd += f" {self.flags_aws or ''}"
+        if self.flags_aws:
+            cmd += " '%s'" % self.flags_aws
 
         inst_info = run_aws(cmd)
         verbose(f"Created instance: {inst_info['InstanceId']}")
@@ -270,8 +280,8 @@ class EC2Backup:
         volume is in "in_use" state.
         """
 
-        s = boto3.session.Session(region_name=self.region)
         try:
+            s = boto3.session.Session(region_name=self.region)
             self.instance.attach_volume(
                 Device='/dev/sdx', VolumeId=self.volume.volume_id)
             client = s.client('ec2')
@@ -301,20 +311,22 @@ class EC2Backup:
 
         try:
             # tilde expand for ssh env var
-            f_ssh = ' '.join(map(lambda x: os.path.expanduser(x)
-                                 if x[0] == '~' else x, self.flags_ssh.split()))
+            f_ssh = "'%s'" % " ".join(map(lambda x: os.path.expanduser(
+                x) if x[0] == '~' else x, (self.flags_ssh or '').split()))
             cmd = ((f"tar -cf - {self.src_dir} | ssh -o LogLevel=quiet "
-                    f"'{f_ssh or ''}' root@{self.instance.public_dns_name}"
-                    f" /bin/dd of=/dev/xbd2d"))
+                    f"{f_ssh if self.flags_ssh else ''} "
+                    f"root@{self.instance.public_dns_name} "
+                    f"/bin/dd of=/dev/xbd2d"))
             verbose(f"Copying {self.src_dir} to EBS")
-            proc = run(cmd, shell=True, check=True, capture_output=True)
+            proc = run(cmd, shell=True, capture_output=True)
             verbose(f"stdout:\n{proc.stdout.decode('utf8')}")
-            verbose(f"stderr:\n{proc.sterr.decode('utf8')}")
+            verbose(f"stderr:\n{proc.stderr.decode('utf8')}")
+            proc.check_returncode()
             return
         except CalledProcessError as e:
             error(f'an unknown occurred in the ssh subprocess:\n{e}')
         except Exception as e:
-            error('an unknown error occurred while attempting to ssh')
+            error(f'an unknown error occurred while attempting to ssh:\n{e}')
 
     def print_volume_id(self):
         print(self.volume.volume_id)
