@@ -1,6 +1,5 @@
 #!/usr/bin/env python3.7
 from subprocess import run, Popen, PIPE, CalledProcessError
-from time import sleep
 from math import ceil
 import inspect
 import boto3
@@ -221,7 +220,7 @@ class EC2Backup:
             Size=self.src_size * 2, VolumeType='standard')
         global orphan_ebs
         orphan_ebs = True
-        verbose((f"Created Volume: {self.volume.volume_id}"
+        verbose((f"Created Volume: {self.volume.volume_id} "
                  f"Size: ({self.src_size * 2} GiB)"))
         verbose(f"Waiting until volume is available...")
         client = s.client('ec2')
@@ -301,13 +300,16 @@ class EC2Backup:
         """
 
         try:
-            # TODO change tar for netbsd and check SSH
-            cmd = ((f"tar -cf - {self.src_dir} | ssh -q {self.flags_ssh or ''} "
-                    f"root@{self.instance.public_dns_name} "
-                    f"/bin/dd of='/dev/xbd2'"))
+            # tilde expand for ssh env var
+            f_ssh = ' '.join(map(lambda x: os.path.expanduser(x)
+                                 if x[0] == '~' else x, self.flags_ssh.split()))
+            cmd = ((f"tar -cf - {self.src_dir} | ssh -o LogLevel=quiet "
+                    f"'{f_ssh or ''}' root@{self.instance.public_dns_name}"
+                    f" /bin/dd of=/dev/xbd2d"))
             verbose(f"Copying {self.src_dir} to EBS")
             proc = run(cmd, shell=True, check=True, capture_output=True)
-            verbose(proc.stdout.decode('utf8'))
+            verbose(f"stdout:\n{proc.stdout.decode('utf8')}")
+            verbose(f"stderr:\n{proc.sterr.decode('utf8')}")
             return
         except CalledProcessError as e:
             error(f'an unknown occurred in the ssh subprocess:\n{e}')
@@ -320,12 +322,7 @@ class EC2Backup:
 
 def main():
     args = parse_args()
-
     EC2Backup(args.dir[0], args.v)
-
-    # Testing Volumes
-    # vol-08e068684d257a0b3 - us-east-1a
-    # vol-0a2722cd4a12e8a66 - eu-west-1a
 
 
 if __name__ == "__main__":

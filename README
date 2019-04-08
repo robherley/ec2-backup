@@ -1,5 +1,35 @@
 Robert Herley <rherley>
 HW6 - ec2-backup
 
-- using boto3
-- using du with -g flag
+The Solution
+============
+
+For the second iteration of the assignment, I strayed away from just executing
+shell commands in Python, and instead used the official AWS SDK, boto3. Using
+the SDK, I created a class (EC2Backup) that created the following control flow
+when instantiated:
+
+> Parse Command Args
+> Check Env Variables
+> Check Source Exists, and Read Access, Compute Size in GiB
+> Is the Volume is Provided?
+  Yes > Check AZ and Size
+  No  > Create a New Volume twice size of 
+
+
+Learning From Mistakes
+======================
+
+- exit handler
+- boto3 waiters and aws ec2 wait
+
+
+Python and Boto3
+================
+
+For the second rendition of the assignment, I again chose Python (3.7). 
+
+Problems Encountered
+====================
+
+- size conversions
