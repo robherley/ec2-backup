@@ -147,11 +147,11 @@ class EC2Backup:
 
         self.attach_volume()
 
-        # Wait another 50 seconds for instance to be ready for SSH. This is
+        # Wait more than a few seconds for instance to be ready for SSH. This is
         # known to happen on slow-booting AMIs even though our instance is
         # reporting back a "ready" state to AWS.
-        verbose("Waiting additional 50 seconds for EC2 to boot...")
-        sleep(50)
+        verbose("Waiting additional 40 seconds for EC2 to boot...")
+        sleep(40)
 
         self.start_backup()
 
